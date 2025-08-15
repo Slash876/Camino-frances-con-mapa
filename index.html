@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Camino Francés — Mapa (GPS → posición virtual)</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="anonymous">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin="anonymous"></script>
+<style>
+  :root{ --bg:#0b1020; --panel:#111a2e; --ink:#e6eefc; --muted:#9fb3d9; --accent:#0ea5e9; --good:#22c55e; }
+  html,body{height:100%;margin:0;background:var(--bg);color:var(--ink);font-family:system-ui,-apple-system,Segoe UI,Roboto,Inter,Arial,sans-serif}
+  #app{display:flex;flex-direction:column;height:100%}
+  header{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 12px;background:linear-gradient(180deg,#0b1020,#0e1730)}
+  h1{font-size:16px;margin:0;color:#cfe2ff;font-weight:800;letter-spacing:.3px}
+  .controls{display:flex;gap:8px;flex-wrap:wrap}
+  button{border:1px solid rgba(255,255,255,.12);background:#0e1730;color:var(--ink);padding:8px 10px;border-radius:10px;cursor:pointer;font-weight:700}
+  button.primary{background:linear-gradient(180deg,#0ea5e9,#0284c7);color:#00121a;border-color:rgba(0,0,0,.2)}
+  button.green{background:linear-gradient(180deg,#22c55e,#16a34a);color:#03140a;border-color:rgba(0,0,0,.2)}
+  button:disabled{opacity:.6;cursor:not-allowed}
+  #kmBox{font-size:18px;font-weight:900}
+  #map{flex:1 1 auto}
+  .panel{background:var(--panel);border-top:1px solid rgba(255,255,255,.08);padding:8px 12px;display:flex;justify-content:space-between;gap:10px;align-items:center}
+  .muted{color:var(--muted);font-size:13px}
+  .chips{display:flex;gap:8px;flex-wrap:wrap}
+  .chip{font-size:12px;border:1px solid #203055;color:#dbe7ff;background:#0d1731;padding:6px 9px;border-radius:999px;text-decoration:none}
+  .chip:hover{border-color:#3b6ab0}
+  details{margin-left:auto}
+  summary{cursor:pointer}
+  .legend{position:absolute;right:10px;top:58px;background:rgba(15,23,42,.9);color:#dbe7ff;border:1px solid rgba(255,255,255,.12);padding:8px 10px;border-radius:10px;font-size:12px;z-index:999}
+  .legend b{color:#fff}
+  .leaflet-container{background:#071022}
+  .marker-img{transform: translate(-16px,-36px)}
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>Camino Francés — posición virtual en mapa</h1>
+    <div class="controls">
+      <button id="btnStart" class="primary">Empezar GPS</button>
+      <button id="btnPause">Pausar</button>
+      <button id="btnCenter" class="green">Centrar</button>
+      <button id="btnNudge">+100 m</button>
+      <button id="btnReset">Reiniciar</button>
+    </div>
+    <div id="kmBox">0,00 km</div>
+  </header>
+
+  <div id="map"></div>
+
+  <div class="panel">
+    <div class="muted" id="status">Listo. Abre esto en HTTPS (GitHub Pages) y pulsa “Empezar GPS”.</div>
+    <details>
+      <summary class="muted">Enlaces para peregrinos</summary>
+      <div class="chips" id="chips"></div>
+    </details>
+  </div>
+</div>
+
+<div class="legend">
+  <div><b>Línea roja</b>: ruta simplificada del Camino Francés (GeoJSON)</div>
+  <div><b>🚶</b>: tu posición virtual según km acumulados</div>
+</div>
+
+<script>
+const fmt = (n)=> new Intl.NumberFormat('es-ES',{minimumFractionDigits:2, maximumFractionDigits:2}).format(n);
+const STORAGE_KEY = "caminoMapV2";
+const state = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
+if(state.meters == null) state.meters = 0;
+let watchId = null;
+let lastFix = null;
+function save(){ localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
+function haversine(lat1,lon1,lat2,lon2){
+  const R=6371000, toRad=d=>d*Math.PI/180;
+  const dLat=toRad(lat2-lat1), dLon=toRad(lon2-lon1);
+  const a=Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
+  return 2*R*Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+const wps = [
+  {name:"Roncesvalles", slug:"navarra/roncesvalles-orreaga"},
+  {name:"Zubiri", slug:"navarra/zubiri"},
+  {name:"Pamplona / Iruña", slug:"navarra/pamplona-iruna"},
+  {name:"Puente la Reina / Gares", slug:"navarra/puente-reina-gares"},
+  {name:"Estella / Lizarra", slug:"navarra/estella-lizarra"},
+  {name:"Los Arcos", slug:"navarra/arcos"},
+  {name:"Logroño", slug:"rioja/logrono"},
+  {name:"Nájera", slug:"rioja/najera"},
+  {name:"Santo Domingo de la Calzada", slug:"rioja/santo-domingo-calzada"},
+  {name:"Burgos", slug:"castilla-y-leon/burgos/burgos"},
+  {name:"Frómista", slug:"castilla-y-leon/palencia/fromista"},
+  {name:"Carrión de los Condes", slug:"castilla-y-leon/palencia/carrion-condes"},
+  {name:"Sahagún", slug:"castilla-y-leon/leon/sahagun"},
+  {name:"León", slug:"castilla-y-leon/leon/leon"},
+  {name:"Astorga", slug:"castilla-y-leon/leon/astorga"},
+  {name:"Rabanal del Camino", slug:"castilla-y-leon/leon/rabanal-camino"},
+  {name:"Foncebadón", slug:"castilla-y-leon/leon/foncebadon"},
+  {name:"Ponferrada", slug:"castilla-y-leon/leon/ponferrada"},
+  {name:"Villafranca del Bierzo", slug:"castilla-y-leon/leon/villafranca-bierzo"},
+  {name:"O Cebreiro", slug:"galicia/lugo/cebreiro"},
+  {name:"Triacastela", slug:"galicia/lugo/triacastela"},
+  {name:"Sarria", slug:"galicia/lugo/sarria"},
+  {name:"Portomarín", slug:"galicia/lugo/portomarin"},
+  {name:"Palas de Rei", slug:"galicia/lugo/palas-rei"},
+  {name:"Melide", slug:"galicia/coruna/melide"},
+  {name:"Arzúa", slug:"galicia/coruna/arzua"},
+  {name:"O Pedrouzo (O Pino)", slug:"galicia/coruna/o-pedrouzo-o-pino"},
+  {name:"Monte do Gozo", slug:"galicia/coruna/monte-do-gozo"},
+  {name:"Santiago de Compostela", slug:"galicia/coruna/santiago-compostela"}
+];
+
+const map = L.map('map', { zoomControl:true });
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 18,
+  attribution: '&copy; OpenStreetMap — Camino simplificado'
+}).addTo(map);
+
+const walkerIcon = L.icon({ iconUrl: 'assets/peregrino.svg', iconSize: [32,32], iconAnchor: [16,28], className:'marker-img' });
+const marker = L.marker([42.9889,-1.3204], {icon:walkerIcon}).addTo(map);
+
+let path = [], cum = [0], totalLen = 0;
+
+function positionOnPath(meters){
+  const d = Math.max(0, Math.min(meters, totalLen));
+  let i = 1;
+  while(i<cum.length && cum[i] < d) i++;
+  const i0 = Math.max(0, i-1), i1 = Math.min(path.length-1, i);
+  const segLen = (cum[i1]-cum[i0]) || 1;
+  const t = (d - cum[i0]) / segLen;
+  const lat = path[i0][0] + t*(path[i1][0]-path[i0][0]);
+  const lon = path[i0][1] + t*(path[i1][1]-path[i0][1]);
+  return [lat,lon];
+}
+function currentTown(km){
+  let idx = 0;
+  for(let i=0;i<wps.length;i++){
+    if(km >= (cum[i]/1000)) idx = i;
+  }
+  return wps[idx];
+}
+function updateChips(){
+  const km = state.meters/1000;
+  const t = currentTown(km);
+  const chips = document.getElementById('chips');
+  const url = `https://www.gronze.com/${t.slug}`;
+  chips.innerHTML = `
+    <a class="chip" href="https://www.gronze.com/camino-frances" target="_blank" rel="noopener">Índice Camino Francés</a>
+    <a class="chip" href="${url}" target="_blank" rel="noopener">Gronze — ${t.name}</a>
+    <a class="chip" href="${url}" target="_blank" rel="noopener">Albergues y servicios</a>
+  `;
+}
+function renderKmBox(){ document.getElementById('kmBox').textContent = fmt(state.meters/1000) + " km"; }
+
+fetch('camino_frances_simplificado.geojson')
+  .then(r=>r.json())
+  .then(data=>{
+    const layer = L.geoJSON(data, { style:{color:'#ff3b3b', weight:4, opacity:0.9} }).addTo(map);
+    map.fitBounds(layer.getBounds(), {padding:[20,20]});
+    const coords = data.features[0].geometry.coordinates;
+    path = coords.map(([lng,lat])=>[lat,lng]);
+    cum = [0];
+    for(let i=1;i<path.length;i++){
+      const d = haversine(path[i-1][0],path[i-1][1],path[i][0],path[i][1]);
+      cum[i] = cum[i-1] + d;
+    }
+    totalLen = cum[cum.length-1];
+    marker.setLatLng(positionOnPath(state.meters));
+    renderKmBox(); updateChips();
+  })
+  .catch(e=>{
+    const fallback = [[42.9889,-1.3204],[42.8806,-8.5453]];
+    const line = L.polyline(fallback, {color:'#ff3b3b', weight:4}).addTo(map);
+    map.fitBounds(line.getBounds(), {padding:[20,20]});
+    path = fallback;
+    cum = [0, haversine(path[0][0],path[0][1],path[1][0],path[1][1])];
+    totalLen = cum[1];
+  });
+
+const statusEl = document.getElementById('status');
+function onPos(pos){
+  statusEl.textContent = "GPS activo";
+  const acc = pos.coords.accuracy ?? 9999;
+  const lat = pos.coords.latitude, lon = pos.coords.longitude;
+  const now = Date.now();
+  const minAcc = 50; if(acc > minAcc) return;
+
+  if(window._lastFix){
+    const d = haversine(window._lastFix.lat, window._lastFix.lon, lat, lon);
+    const dt = (now - window._lastFix.t)/1000;
+    const speed = dt>0 ? d/dt : 0;
+    const maxSpeed = 3.0, minStep = 3;
+    if(d >= minStep && speed <= maxSpeed){
+      state.meters += d; save();
+      marker.setLatLng(positionOnPath(state.meters));
+      renderKmBox(); updateChips();
+    }
+  }
+  window._lastFix = {lat,lon,t:now};
+}
+function onErr(err){ statusEl.textContent = "Error GPS: " + err.message + ". En HTTPS debe pedir permiso."; }
+function startGPS(){
+  if(!navigator.geolocation){ alert("Tu navegador no soporta geolocalización."); return; }
+  if(watchId!=null) return;
+  statusEl.textContent = "Solicitando permiso de ubicación…";
+  watchId = navigator.geolocation.watchPosition(onPos, onErr, {enableHighAccuracy:true, maximumAge:0, timeout:20000});
+  document.getElementById('btnPause').disabled = false;
+}
+function pauseGPS(){
+  if(watchId!=null){
+    navigator.geolocation.clearWatch(watchId);
+    watchId = null;
+    statusEl.textContent = "GPS pausado";
+  }else{
+    startGPS();
+  }
+}
+document.getElementById('btnStart').addEventListener('click', startGPS);
+document.getElementById('btnPause').addEventListener('click', ()=>{
+  const was = watchId!=null;
+  pauseGPS();
+  document.getElementById('btnPause').textContent = was ? "Reanudar" : "Pausar";
+});
+document.getElementById('btnCenter').addEventListener('click', ()=>{
+  const p = positionOnPath(state.meters);
+  map.setView(p, Math.max(map.getZoom(), 11), {animate:true});
+});
+document.getElementById('btnNudge').addEventListener('click', ()=>{
+  state.meters += 100; save();
+  marker.setLatLng(positionOnPath(state.meters));
+  renderKmBox(); updateChips();
+});
+document.getElementById('btnReset').addEventListener('click', ()=>{
+  if(confirm("¿Seguro que quieres reiniciar el progreso?")){
+    state.meters = 0; save();
+    marker.setLatLng(positionOnPath(0));
+    renderKmBox(); updateChips();
+    window._lastFix = null;
+    statusEl.textContent = "Reiniciado";
+  }
+});
+</script>
+</body>
+</html>
